@@ -1,0 +1,23 @@
+{
+  "apiBase": "http://localhost:7071/api",
+  "fetchEndpoint": "/FetchDataset",
+  "cors": {
+    "allowedOrigins": [
+      "*"
+    ],
+    "methods": [
+      "GET",
+      "OPTIONS"
+    ]
+  },
+  "blob": {
+    "container": "diet-data",
+    "blobName": "All_Diets.csv"
+  },
+  "nutrientKeys": [
+    "Protein",
+    "Carbs",
+    "Fat"
+  ],
+  "cacheSeconds": 60
+}
