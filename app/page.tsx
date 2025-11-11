@@ -30,6 +30,67 @@ export default function Page() {
     return null;
   }
 
+  // Simple CSV parser that handles quoted fields and CRLF/LF newlines.
+  function parseCSV(text: string) {
+    const rows: string[][] = [];
+    let field = "";
+    let row: string[] = [];
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      const next = text[i + 1];
+      if (ch === '"') {
+        if (inQuotes && next === '"') {
+          // Escaped quote
+          field += '"';
+          i++; // skip next
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (ch === ',' && !inQuotes) {
+        row.push(field);
+        field = "";
+      } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+        // end of record
+        // handle CRLF by skipping the LF after CR
+        if (ch === '\r' && next === '\n') {
+          // do nothing special, the loop will hit the LF next and skip because field is flushed
+        }
+        row.push(field);
+        field = "";
+        // Only add non-empty row (could be final newline)
+        rows.push(row);
+        row = [];
+        // skip if next is LF after CR
+        if (ch === '\r' && next === '\n') i++;
+      } else {
+        field += ch;
+      }
+    }
+    // push last field/row if any
+    if (field !== "" || row.length > 0) {
+      row.push(field);
+      rows.push(row);
+    }
+
+    // Normalize: remove any empty trailing rows
+    while (rows.length > 0 && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0] === "") {
+      rows.pop();
+    }
+
+    if (rows.length === 0) return [];
+
+    const header = rows[0].map((h) => h.trim());
+    const dataRows = rows.slice(1);
+    return dataRows.map((r) => {
+      const obj: Record<string, any> = {};
+      for (let i = 0; i < header.length; i++) {
+        obj[header[i]] = (r[i] ?? '').trim();
+      }
+      return obj;
+    });
+  }
+
   // Build echarts options from available data (use searchResults if filtered)
   function buildBarOption() {
     const src = data;
@@ -199,15 +260,76 @@ export default function Page() {
       try {
         const start = performance.now();
         const response = await fetch("https://get-data-exaxb3e2dcddc6h8.canadacentral-01.azurewebsites.net/api/fetchdataset");
-        const data = await response.json();
+
+        // Read raw text first so we can give better diagnostics when parsing fails
+        const text = await response.text();
+        let parsedData: any = null;
+
+        if (response.ok) {
+          const contentType = (response.headers.get("content-type") || "").toLowerCase();
+          // If the server advertises JSON, parse it. Otherwise attempt to parse but provide helpful error info.
+          if (contentType.includes("application/json") || contentType.includes("text/json")) {
+            try {
+              parsedData = JSON.parse(text);
+            } catch (parseErr) {
+              // Try stripping a possible BOM then parse again
+              const noBOM = text.replace(/^\uFEFF/, "");
+              try {
+                parsedData = JSON.parse(noBOM);
+                  } catch (e) {
+                    // If JSON parsing fails but the body looks like CSV, parse as CSV instead of failing.
+                    const firstLine = text.split(/\r?\n/)[0] || '';
+                    // Heuristic: treat as CSV if the first line contains commas (multiple columns)
+                    // and it does not look like HTML or JSON.
+                    const looksLikeCsv = firstLine.includes(',') && firstLine.split(',').length >= 2 &&
+                      !firstLine.trim().startsWith('<') && !firstLine.includes('{') && !firstLine.includes('[');
+                    if (looksLikeCsv) {
+                      parsedData = parseCSV(text);
+                    } else {
+                      throw new Error(
+                        `Invalid JSON from dataset endpoint: ${String((parseErr as Error).message)}. Response snippet: ${text.slice(0, 200)}`
+                      );
+                    }
+                  }
+            }
+          } else if (contentType.includes('text/csv') || contentType.includes('application/csv')) {
+            // Parse CSV into array of objects
+            parsedData = parseCSV(text);
+          } else {
+            // Content-type is not JSON or CSV. Try a heuristic: if it looks like CSV (has commas and a header row), parse as CSV.
+            const firstLine = text.split(/\r?\n/)[0] || '';
+            const looksLikeCsv = firstLine.includes(',') && firstLine.split(',').length >= 2 &&
+              !firstLine.trim().startsWith('<') && !firstLine.includes('{') && !firstLine.includes('[');
+            if (looksLikeCsv) {
+              parsedData = parseCSV(text);
+            } else {
+              // Content-type is something else (HTML error page, plain text, etc.)
+              try {
+                parsedData = JSON.parse(text);
+              } catch (e) {
+                throw new Error(
+                  `Expected JSON or CSV but got content-type '${contentType}'. Response snippet: ${text.slice(0, 200)}`
+                );
+              }
+            }
+          }
+        } else {
+          // Non-2xx response: include status and a snippet of the body for debugging
+          throw new Error(`Fetch failed: ${response.status} ${response.statusText}. Body snippet: ${text.slice(0,200)}`);
+        }
+
         const end = performance.now();
         const duration = end - start;
-        console.log(data);
-        setData(data);
+        console.log(parsedData);
+        setData(parsedData);
         setFunctionExecMs(duration);
         setLastFetchTime(new Date().toISOString());
       } catch (error) {
+        // Provide richer logging so developers can see whether the server returned HTML or invalid JSON
         console.error("Error fetching dataset:", error);
+        // Set last fetch time so UI reflects attempt; keep functionExecMs null on error
+        setFunctionExecMs(null);
+        setLastFetchTime(new Date().toISOString());
       }
     }
 
